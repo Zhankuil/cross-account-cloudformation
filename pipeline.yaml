@@ -155,7 +155,7 @@ Resources:
                 Version: "1"
                 Provider: "CodeCommit"
               OutputArtifacts:
-                - Name: "MyApp"
+                - Name: "Artifact"
               Configuration:
                 BranchName: "master"
                 RepositoryName: !GetAtt DemoSourceRepository.Name
@@ -172,11 +172,11 @@ Resources:
                 Version: "1"
                 Provider: "CloudFormation"
               Configuration:
-                StackName: "DemoS3Bucket"
+                StackName: "Infrastructure"
                 ActionMode: "CREATE_UPDATE"
                 RoleArn: !Join ["", ["arn:aws:iam::", {"Ref": "DeployAccountId"}, ":role/CloudFormationServiceRole"]]
                 Capabilities: "CAPABILITY_IAM"
-                TemplatePath: "MyApp::template.yaml"
+                TemplatePath: "Artifact::template.yaml"
               RunOrder: 1
       ArtifactStore:
         Type: "S3"
