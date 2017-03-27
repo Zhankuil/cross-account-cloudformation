@@ -1,0 +1,186 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  DeployAccountId:
+    Type: "String"
+Resources:
+  DemoSourceRepository:
+    Type: "AWS::CodeCommit::Repository"
+    Properties:
+      RepositoryName: "CrossAccountCloudFormationDemo"
+
+  DemoArtifactBucket:
+    Type: "AWS::S3::Bucket"
+
+  ArtifactBucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref DemoArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Id: "ArtifactBucketPolicy"
+        Statement:
+          - Sid: "DenyUnEncryptedObjectUploads"
+            Effect: "Deny"
+            Principal: "*"
+            Action: "s3:PutObject"
+            Resource:
+              - !Join ["", ["arn:aws:s3:::", {"Ref": "DemoArtifactBucket"}, "/*"]]
+            Condition:
+              StringNotEquals:
+                  "s3:x-amz-server-side-encryption": "aws:kms"
+          - Sid: "DenyInsecureConnections"
+            Effect: "Deny"
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !Join ["", ["arn:aws:s3:::", {"Ref": "DemoArtifactBucket"}, "/*"]]
+            Condition:
+              Bool:
+                  "aws:SecureTransport": "false"
+          - Sid: "CrossAccountGet"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - !Join ["", ["arn:aws:iam::", {"Ref": "DeployAccountId"}, ":root"]]
+            Action: "s3:Get*"
+            Resource:
+              - !Join ["", ["arn:aws:s3:::", {"Ref": "DemoArtifactBucket"}, "/*"]]
+          - Sid: "CrossAccountListBucket"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - !Join ["", ["arn:aws:iam::", {"Ref": "DeployAccountId"}, ":root"]]
+            Action: "s3:ListBucket"
+            Resource:
+              - !Join ["", ["arn:aws:s3:::", {"Ref": "DemoArtifactBucket"}]]
+
+  # Role assumable by codepipeline
+  DemoCodePipelineServiceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Sid: ""
+            Effect: "Allow"
+            Principal:
+                Service:
+                    - "codepipeline.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: "s3"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "codecommit:CancelUploadArchive"
+                  - "codecommit:GetBranch"
+                  - "codecommit:GetCommit"
+                  - "codecommit:GetUploadArchiveStatus"
+                  - "codecommit:UploadArchive"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                    - "s3:*"
+                Resource: "*"
+              - Effect: "Allow"
+                Action:
+                  - "kms:DescribeKey"
+                  - "kms:GenerateDataKey*"
+                  - "kms:Encrypt"
+                  - "kms:ReEncrypt*"
+                  - "kms:Decrypt"
+                Resource: "*"
+        - PolicyName: "sts"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "sts:AssumeRole"
+                Resource:
+                  - !Join ["", ["arn:aws:iam::", {"Ref": "DeployAccountId"}, ":*"]]
+
+  DemoEncryptionKey:
+    Type: "AWS::KMS::Key"
+    Properties:
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Allow adminstration of the key"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - !Join ["", ["arn:aws:iam::", {"Ref": "AWS::AccountId"}, ":root"]]
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+          - Sid: "Allow use of the key"
+            Effect: "Allow"
+            Principal:
+              AWS:
+                - !Join ["", ["arn:aws:iam::", {"Ref": "DeployAccountId"}, ":root"]]
+                - !GetAtt DemoCodePipelineServiceRole.Arn
+            Action:
+              - "kms:Encrypt"
+              - "kms:Decrypt"
+              - "kms:ReEncrypt*"
+              - "kms:GenerateDataKey*"
+              - "kms:DescribeKey"
+            Resource: "*"
+
+  DemoPipeline:
+    Type: "AWS::CodePipeline::Pipeline"
+    Properties:
+      RoleArn: !GetAtt DemoCodePipelineServiceRole.Arn
+      Stages:
+        - Name: "Source"
+          Actions:
+            - Name: "Source"
+              ActionTypeId:
+                Category: "Source"
+                Owner: "AWS"
+                Version: "1"
+                Provider: "CodeCommit"
+              OutputArtifacts:
+                - Name: "MyApp"
+              Configuration:
+                BranchName: "master"
+                RepositoryName: !GetAtt DemoSourceRepository.Name
+              RunOrder: 1
+        - Name: "Beta"
+          Actions:
+            - Name: "Beta"
+              InputArtifacts:
+                - Name: "MyApp"
+              RoleArn: !Join ["", ["arn:aws:iam::", {"Ref": "DeployAccountId"}, ":role/CloudFormationCrossAccountDeployment"]]
+              ActionTypeId:
+                Category: "Deploy"
+                Owner: "AWS"
+                Version: "1"
+                Provider: "CloudFormation"
+              Configuration:
+                StackName: "DemoS3Bucket"
+                ActionMode: "CREATE_UPDATE"
+                RoleArn: !Join ["", ["arn:aws:iam::", {"Ref": "DeployAccountId"}, ":role/CloudFormationServiceRole"]]
+                Capabilities: "CAPABILITY_IAM"
+                TemplatePath: "MyApp::template.yaml"
+              RunOrder: 1
+      ArtifactStore:
+        Type: "S3"
+        Location: !Ref DemoArtifactBucket
+        EncryptionKey:
+           Type: "KMS"
+           Id: !Ref DemoEncryptionKey
